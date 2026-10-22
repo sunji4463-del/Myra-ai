@@ -1,41 +1,35 @@
-
 name: Build MYRA APK
 
 on:
   push:
+    branches: [main, master]
+  pull_request:
     branches: [main, master]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Verify project files
-        run: |
-          test -f settings.gradle
-          test -f build.gradle
-          test -f app/build.gradle
-          test -f app/src/main/AndroidManifest.xml
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Generate Gradle Wrapper
-        run: gradle wrapper --gradle-version 8.2
-
-      - name: Build Debug APK
-        run: ./gradlew --no-daemon assembleDebug
-
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
         with:
-          name: myra-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          gradle-version: '8.2'
+
+      # settings.gradle jekhanei thakuk (root ba Myra/ subfolder), auto-detect kore
+      - name: Find Gradle project
+        run: |
+          SETTINGS=$(find . -maxdepth 4 \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -not -pat
