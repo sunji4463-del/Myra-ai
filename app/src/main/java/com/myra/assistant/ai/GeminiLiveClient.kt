@@ -25,7 +25,11 @@ class GeminiLiveClient(
   }
 
   private val client = OkHttpClient.Builder()
-    .pingInterval(15, TimeUnit.SECONDS)
+    .pingInterval(30, TimeUnit.SECONDS)
+    .connectTimeout(30, TimeUnit.SECONDS)
+    .readTimeout(0, TimeUnit.SECONDS)
+    .writeTimeout(30, TimeUnit.SECONDS)
+    .retryOnConnectionFailure(true)
     .build()
 
   private var webSocket: WebSocket? = null
@@ -46,7 +50,6 @@ class GeminiLiveClient(
     private set
   private var isSpeaking = false
   private val silentPcm: ByteArray by lazy { ByteArray(3200) { 0 } }
-  // Buffer audio chunks jab tak setup complete nahi hota
   private val audioBuffer = java.util.ArrayList<ByteArray>()
   private var bufferAudio = false
 
@@ -58,9 +61,8 @@ class GeminiLiveClient(
     isSetupComplete = false
     bufferAudio = true
     audioBuffer.clear()
-    // Priority: manual key (SharedPreferences) > BuildConfig > error
-    val manualKey = prefs.getString("api_key", null)?.takeIf { it.isNotBlank() }
-    val buildKey = BuildConfig.GEMINI_API_KEY.takeIf { it.isNotBlank() }
+    val manualKey = prefs.getString("api_key", null)?.trim()?.takeIf { it.isNotBlank() }
+    val buildKey = BuildConfig.GEMINI_API_KEY.trim().takeIf { it.isNotBlank() }
     val apiKey = manualKey ?: buildKey
     if (apiKey == null) {
       Log.w(TAG, "No API key found. Set in Settings or local.properties")
@@ -83,15 +85,22 @@ class GeminiLiveClient(
       .url(wsUrl)
       .build()
 
+    webSocket?.cancel()
+    sessionJob?.cancel()
+    keepaliveJob?.cancel()
     webSocket = client.newWebSocket(request, object : WebSocketListener() {
       override fun onOpen(webSocket: WebSocket, response: Response) {
         Log.d(TAG, "WebSocket opened")
         isConnected = true
-        sendSetup(model!!, voice!!, systemPrompt)
+        sendSetup(model, voice, systemPrompt)
       }
 
       override fun onMessage(webSocket: WebSocket, text: String) {
         handleMessage(text)
+      }
+
+      override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+        handleMessage(bytes.utf8())
       }
 
       override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -101,13 +110,16 @@ class GeminiLiveClient(
       }
 
       override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+        if (webSocket !== this@GeminiLiveClient.webSocket) return
         Log.d(TAG, "WebSocket closed: $code / $reason")
         isConnected = false
         isSetupComplete = false
+        if (code != 1000) onError?.invoke("Closed: $code $reason")
         scheduleReconnect()
       }
 
       override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+        if (webSocket !== this@GeminiLiveClient.webSocket) return
         Log.e(TAG, "WebSocket failure: ${t.message}")
         isConnected = false
         isSetupComplete = false
@@ -155,7 +167,6 @@ class GeminiLiveClient(
           Log.d(TAG, "Setup complete — flushing buffered audio")
           isSetupComplete = true
           bufferAudio = false
-          // Pehle buffer kiye hue chunks bhejo
           for (chunk in audioBuffer) {
             sendRawAudioChunk(chunk)
           }
@@ -209,11 +220,9 @@ class GeminiLiveClient(
 
   fun sendAudioChunk(pcmData: ByteArray) {
     if (!isConnected) return
-    // Agar setup complete nahi hai, buffer mein rakh lo
     if (!isSetupComplete) {
       if (bufferAudio) {
         audioBuffer.add(pcmData.copyOf())
-        // Buffer bada hone se roko — max 50 chunks (~3 sec)
         if (audioBuffer.size > 50) audioBuffer.removeAt(0)
       }
       return
@@ -280,8 +289,9 @@ class GeminiLiveClient(
     audioBuffer.clear()
     sessionJob?.cancel()
     keepaliveJob?.cancel()
-    webSocket?.close(1000, "Disconnecting")
+    val ws = webSocket
     webSocket = null
+    ws?.close(1000, "Disconnecting")
   }
 
   private fun startSessionRenewal() {
