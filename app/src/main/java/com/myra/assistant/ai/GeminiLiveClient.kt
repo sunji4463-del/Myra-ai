@@ -52,6 +52,7 @@ class GeminiLiveClient(
   private val silentPcm: ByteArray by lazy { ByteArray(3200) { 0 } }
   private val audioBuffer = java.util.ArrayList<ByteArray>()
   private var bufferAudio = false
+  @Volatile private var connecting = false
 
   fun connect() {
     if (isConnected) {
@@ -71,8 +72,59 @@ class GeminiLiveClient(
     }
     Log.d(TAG, "Connecting with ${if (manualKey != null) "manual key" else "BuildConfig key"}")
 
-    val model = prefs.getString("gemini_model", "models/gemini-2.5-flash-native-audio-preview-12-2025")
-      ?: "models/gemini-2.5-flash-native-audio-preview-12-2025"
+    if (connecting) return
+    connecting = true
+    scope.launch {
+      try {
+        val savedModel = prefs.getString("gemini_model", null)
+        val model = resolveModel(apiKey, savedModel)
+        Log.d(TAG, "Using model: $model")
+        openSocket(apiKey, model)
+      } catch (e: Exception) {
+        Log.e(TAG, "connect error", e)
+        onError?.invoke("Connect error: ${e.message}")
+      } finally {
+        connecting = false
+      }
+    }
+  }
+
+  // Google ke server se available Live (bidiGenerateContent) model khud dhundho
+  private fun resolveModel(apiKey: String, saved: String?): String {
+    val fallback = saved ?: "models/gemini-2.5-flash-native-audio-preview-12-2025"
+    return try {
+      val req = Request.Builder()
+        .url("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=$apiKey")
+        .build()
+      val body = client.newCall(req).execute().use { it.body?.string() } ?: return fallback
+      val arr = JSONObject(body).optJSONArray("models") ?: return fallback
+      val live = ArrayList<String>()
+      for (i in 0 until arr.length()) {
+        val m = arr.getJSONObject(i)
+        val methods = m.optJSONArray("supportedGenerationMethods") ?: continue
+        for (j in 0 until methods.length()) {
+          if (methods.getString(j) == "bidiGenerateContent") {
+            live.add(m.getString("name"))
+            break
+          }
+        }
+      }
+      Log.d(TAG, "Live models: $live")
+      when {
+        live.isEmpty() -> fallback
+        saved != null && live.contains(saved) -> saved
+        else -> live.firstOrNull { it.contains("native-audio") && !it.contains("preview-09") }
+          ?: live.firstOrNull { it.contains("native-audio") }
+          ?: live.firstOrNull { it.contains("live") }
+          ?: live.first()
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "resolveModel failed", e)
+      fallback
+    }
+  }
+
+  private fun openSocket(apiKey: String, model: String) {
     val voice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede"
     val userName = prefs.getString("user_name", "Sir") ?: "Sir"
     val personality = prefs.getString("personality_mode", "gf") ?: "gf"
@@ -99,12 +151,9 @@ class GeminiLiveClient(
         handleMessage(text)
       }
 
-      override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
-        handleMessage(bytes.utf8())
-      }
-
       override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
         Log.d(TAG, "WebSocket closing: $code / $reason")
+        if (code != 1000) onError?.invoke("Server closed: $code $reason")
         isConnected = false
         isSetupComplete = false
       }
@@ -114,7 +163,6 @@ class GeminiLiveClient(
         Log.d(TAG, "WebSocket closed: $code / $reason")
         isConnected = false
         isSetupComplete = false
-        if (code != 1000) onError?.invoke("Closed: $code $reason")
         scheduleReconnect()
       }
 
