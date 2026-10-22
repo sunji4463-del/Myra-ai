@@ -30,13 +30,12 @@ jobs:
         with:
           gradle-version: '8.2'
 
-      # settings.gradle jekhanei thakuk (root ba Myra/ subfolder), auto-detect kore
       - name: Find Gradle project
         run: |
           SETTINGS=$(find . -maxdepth 4 \( -name settings.gradle -o -name settings.gradle.kts \) \
             -not -path '*/build/*' -not -path '*/.git/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
           if [ -z "$SETTINGS" ]; then
-            echo "::error::settings.gradle kothao paoa jayni. Repo-r file structure check korun."
+            echo "::error::settings.gradle kothao paoa jayni."
             ls -R . | head -50
             exit 1
           fi
@@ -54,9 +53,14 @@ jobs:
 
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: ./gradlew assembleDebug --stacktrace
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          STATUS=0
+          ./gradlew assembleDebug --console=plain --warning-mode=none > build.log 2>&1 || STATUS=$?
+          echo "===== ERRORS ====="
+          grep -E "^e: |What went wrong|error:|AAPT|FAILED|^> " -A3 build.log | head -80 || true
+          exit $STATUS
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
