@@ -43,6 +43,7 @@ class GeminiLiveClient(
   var onAudioData: ((ByteArray) -> Unit)? = null
   var onTurnComplete: (() -> Unit)? = null
   var onError: ((String) -> Unit)? = null
+  var onToolCall: ((String, String, JSONObject) -> Unit)? = null
 
   var isConnected = false
     private set
@@ -50,6 +51,7 @@ class GeminiLiveClient(
     private set
   private var isSpeaking = false
   private val silentPcm: ByteArray by lazy { ByteArray(3200) { 0 } }
+  // Buffer audio chunks jab tak setup complete nahi hota
   private val audioBuffer = java.util.ArrayList<ByteArray>()
   private var bufferAudio = false
   @Volatile private var connecting = false
@@ -62,6 +64,7 @@ class GeminiLiveClient(
     isSetupComplete = false
     bufferAudio = true
     audioBuffer.clear()
+    // Priority: manual key (SharedPreferences) > BuildConfig > error
     val manualKey = prefs.getString("api_key", null)?.trim()?.takeIf { it.isNotBlank() }
     val buildKey = BuildConfig.GEMINI_API_KEY.trim().takeIf { it.isNotBlank() }
     val apiKey = manualKey ?: buildKey
@@ -207,9 +210,60 @@ class GeminiLiveClient(
         })
         put("output_audio_transcription", JSONObject())
         put("input_audio_transcription", JSONObject())
+        put("tools", buildTools())
       })
     }
     webSocket?.send(setup.toString())
+  }
+
+  private fun fn(name: String, desc: String, props: Map<String, String>, required: List<String>): JSONObject {
+    return JSONObject().apply {
+      put("name", name)
+      put("description", desc)
+      put("parameters", JSONObject().apply {
+        put("type", "OBJECT")
+        put("properties", JSONObject().apply {
+          for ((k, v) in props) {
+            put(k, JSONObject().apply {
+              put("type", "STRING")
+              put("description", v)
+            })
+          }
+        })
+        put("required", JSONArray(required))
+      })
+    }
+  }
+
+  // Gemini ko phone control ke tools batao
+  private fun buildTools(): JSONArray {
+    val decls = JSONArray().apply {
+      put(fn("open_app", "Open an app installed on the user's phone (e.g. WhatsApp, YouTube, Chrome, Facebook, Settings).",
+        mapOf("app_name" to "Name of the app, e.g. whatsapp"), listOf("app_name")))
+      put(fn("close_app", "Close the current app and go to the home screen.", emptyMap(), emptyList()))
+      put(fn("call_contact", "Make a phone call to a saved contact name or a phone number.",
+        mapOf("name" to "Contact name as saved in the phone", "number" to "Phone number, if the user said digits"), emptyList()))
+      put(fn("send_sms", "Send an SMS text message to a contact or phone number.",
+        mapOf("name" to "Contact name", "number" to "Phone number, optional", "message" to "The message text to send"), listOf("message")))
+      put(fn("send_whatsapp", "Write and send a WhatsApp message to a contact or phone number.",
+        mapOf("name" to "Contact name", "number" to "Phone number, optional", "message" to "The message text to send"), listOf("message")))
+      put(fn("web_search", "Search the web on Google in the phone's browser.",
+        mapOf("query" to "What to search for"), listOf("query")))
+    }
+    return JSONArray().put(JSONObject().put("function_declarations", decls))
+  }
+
+  fun sendToolResponse(id: String, name: String, result: String) {
+    val msg = JSONObject().apply {
+      put("tool_response", JSONObject().apply {
+        put("function_responses", JSONArray().put(JSONObject().apply {
+          put("id", id)
+          put("name", name)
+          put("response", JSONObject().put("result", result))
+        }))
+      })
+    }
+    webSocket?.send(msg.toString())
   }
 
   private fun handleMessage(text: String) {
@@ -220,11 +274,25 @@ class GeminiLiveClient(
           Log.d(TAG, "Setup complete — flushing buffered audio")
           isSetupComplete = true
           bufferAudio = false
+          // Pehle buffer kiye hue chunks bhejo
           for (chunk in audioBuffer) {
             sendRawAudioChunk(chunk)
           }
           audioBuffer.clear()
           onSetupComplete?.invoke()
+        }
+        json.has("toolCall") -> {
+          val calls = json.getJSONObject("toolCall").optJSONArray("functionCalls")
+          if (calls != null) {
+            for (i in 0 until calls.length()) {
+              val c = calls.getJSONObject(i)
+              val id = c.optString("id", "")
+              val name = c.optString("name", "")
+              val args = c.optJSONObject("args") ?: JSONObject()
+              Log.d(TAG, "Tool call: $name $args")
+              onToolCall?.invoke(id, name, args)
+            }
+          }
         }
         json.has("serverContent") -> {
           val serverContent = json.getJSONObject("serverContent")
@@ -273,9 +341,11 @@ class GeminiLiveClient(
 
   fun sendAudioChunk(pcmData: ByteArray) {
     if (!isConnected) return
+    // Agar setup complete nahi hai, buffer mein rakh lo
     if (!isSetupComplete) {
       if (bufferAudio) {
         audioBuffer.add(pcmData.copyOf())
+        // Buffer bada hone se roko — max 50 chunks (~3 sec)
         if (audioBuffer.size > 50) audioBuffer.removeAt(0)
       }
       return
@@ -406,6 +476,9 @@ class GeminiLiveClient(
       User's name: $userName
       $personalityBlock
       You are speaking ALOUD — keep responses natural and conversational.
+      You ARE connected to the user's phone and have tools to: open apps, close apps, call contacts, send SMS, send WhatsApp messages, and search the web.
+      NEVER say you cannot open apps, make calls or send messages. When the user asks for any of these, call the matching tool immediately, then briefly confirm what you did.
+      If the user does not say the message text, ask what to write before sending.
     """.trimIndent()
   }
 }
