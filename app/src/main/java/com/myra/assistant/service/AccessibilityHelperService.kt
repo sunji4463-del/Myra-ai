@@ -111,7 +111,8 @@ class AccessibilityHelperService : AccessibilityService() {
   }
 
   private fun findNodeByText(root: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
-    if (root.text?.toString()?.contains(text, ignoreCase = true) == true) {
+    if (root.text?.toString()?.contains(text, ignoreCase = true) == true ||
+      root.contentDescription?.toString()?.contains(text, ignoreCase = true) == true) {
       return root
     }
     for (i in 0 until root.childCount) {
