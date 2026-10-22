@@ -151,6 +151,11 @@ class GeminiLiveClient(
         handleMessage(text)
       }
 
+      // Gemini Live aksar JSON ko binary frame mein bhejta hai
+      override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+        handleMessage(bytes.utf8())
+      }
+
       override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
         Log.d(TAG, "WebSocket closing: $code / $reason")
         if (code != 1000) onError?.invoke("Server closed: $code $reason")
@@ -285,11 +290,9 @@ class GeminiLiveClient(
       val base64 = Base64.encodeToString(pcmData, Base64.NO_WRAP)
       val msg = JSONObject().apply {
         put("realtime_input", JSONObject().apply {
-          put("media_chunks", JSONArray().apply {
-            put(JSONObject().apply {
-              put("mime_type", "audio/pcm;rate=16000")
-              put("data", base64)
-            })
+          put("audio", JSONObject().apply {
+            put("mime_type", "audio/pcm;rate=16000")
+            put("data", base64)
           })
         })
       }
