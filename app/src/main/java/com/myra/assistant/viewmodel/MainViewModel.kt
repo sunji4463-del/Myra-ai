@@ -70,6 +70,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val context = application.applicationContext
   private val contentResolver: ContentResolver = context.contentResolver
 
+  // Gemini function-calling se aaye tools yahan chalte hain
+  fun runTool(name: String, args: org.json.JSONObject, onDone: (String) -> Unit) {
+    viewModelScope.launch(Dispatchers.IO) {
+      val result = try {
+        when (name) {
+          "open_app" -> openApp(args.optString("app_name"))
+          "close_app" -> closeApp()
+          "call_contact" -> toolCall(args.optString("name"), args.optString("number"))
+          "send_sms" -> toolSms(args.optString("name"), args.optString("number"), args.optString("message"))
+          "send_whatsapp" -> toolWhatsApp(args.optString("name"), args.optString("number"), args.optString("message"))
+          "web_search" -> toolSearch(args.optString("query"))
+          else -> "Unknown tool: $name"
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "Tool error: $name", e)
+        "Failed: ${e.message}"
+      }
+      withContext(Dispatchers.Main) { onDone(result) }
+    }
+  }
+
+  private fun hasPermission(p: String): Boolean =
+    androidx.core.content.ContextCompat.checkSelfPermission(context, p) ==
+      android.content.pm.PackageManager.PERMISSION_GRANTED
+
+  private fun pickNumber(name: String, number: String): String? {
+    val digits = number.replace("[^0-9+]".toRegex(), "")
+    if (digits.length >= 5) return digits
+    val nameDigits = name.replace("[^0-9+]".toRegex(), "")
+    if (nameDigits.length >= 5 && name.none { it.isLetter() }) return nameDigits
+    return resolveContactNumber(name)
+  }
+
+  private fun toolCall(name: String, number: String): String {
+    if (!hasPermission(android.Manifest.permission.CALL_PHONE)) return "Call permission not granted. Ask the user to allow Phone permission in app settings."
+    val n = pickNumber(name, number) ?: return "Contact '$name' not found in phone contacts"
+    val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(n))).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+    return "Calling ${if (name.isNotBlank()) name else n}"
+  }
+
+  @Suppress("DEPRECATION")
+  private fun toolSms(name: String, number: String, message: String): String {
+    val n = pickNumber(name, number) ?: return "Contact '$name' not found in phone contacts"
+    if (hasPermission(android.Manifest.permission.SEND_SMS)) {
+      val sms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+        context.getSystemService(android.telephony.SmsManager::class.java)
+      else
+        android.telephony.SmsManager.getDefault()
+      val parts = sms.divideMessage(message)
+      sms.sendMultipartTextMessage(n, null, parts, null, null)
+      return "SMS sent to ${if (name.isNotBlank()) name else n}"
+    }
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("smsto:$n")).apply {
+      putExtra("sms_body", message)
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+    return "SMS permission missing; opened SMS app with the message ready"
+  }
+
+  private fun toolWhatsApp(name: String, number: String, message: String): String {
+    val n = pickNumber(name, number) ?: return "Contact '$name' not found in phone contacts"
+    var clean = n.replace("[^0-9]".toRegex(), "")
+    if (clean.startsWith("0")) clean = "880" + clean.substring(1)
+    val url = "https://wa.me/$clean?text=${Uri.encode(message)}"
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+      setPackage("com.whatsapp")
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    try {
+      context.startActivity(intent)
+    } catch (e: Exception) {
+      intent.setPackage(null)
+      context.startActivity(intent)
+    }
+    // Accessibility on ho to Send button khud dabao
+    if (AccessibilityHelperService.isEnabled(context)) {
+      android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+        AccessibilityHelperService.instance?.clickOnText("Send")
+      }, 4000)
+      return "WhatsApp message sent to ${if (name.isNotBlank()) name else n}"
+    }
+    return "WhatsApp opened with the message ready. Accessibility is off, so the user must tap Send."
+  }
+
+  private fun toolSearch(query: String): String {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=" + Uri.encode(query))).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+    return "Searching Google for $query"
+  }
+
   fun executeCommand(command: AppCommand) {
     viewModelScope.launch(Dispatchers.IO) {
       val result = when (command.type) {
