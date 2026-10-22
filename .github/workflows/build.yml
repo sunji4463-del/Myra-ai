@@ -20,8 +20,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -32,4 +34,32 @@ jobs:
       - name: Find Gradle project
         run: |
           SETTINGS=$(find . -maxdepth 4 \( -name settings.gradle -o -name settings.gradle.kts \) \
-            -not -pat
+            -not -path '*/build/*' -not -path '*/.git/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::settings.gradle kothao paoa jayni. Repo-r file structure check korun."
+            ls -R . | head -50
+            exit 1
+          fi
+          DIR=$(dirname "$SETTINGS")
+          echo "Gradle project dir: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - name: Inject GEMINI_API_KEY
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> local.properties
+
+      - name: Generate Gradle Wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle wrapper --gradle-version 8.2
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew assembleDebug --stacktrace
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: myra-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
