@@ -107,7 +107,11 @@ class GeminiLiveClient(
         val methods = m.optJSONArray("supportedGenerationMethods") ?: continue
         for (j in 0 until methods.length()) {
           if (methods.getString(j) == "bidiGenerateContent") {
-            live.add(m.getString("name"))
+            val n = m.getString("name")
+            // Transcribe/TTS/translate model voice-chat ke liye nahi hain, aur jo model pehle fail hue unhe skip karo
+            val skip = n.contains("transcribe") || n.contains("tts") || n.contains("translate") ||
+              badModels().contains(n)
+            if (!skip) live.add(n)
             break
           }
         }
@@ -127,7 +131,20 @@ class GeminiLiveClient(
     }
   }
 
+  @Volatile private var currentModel: String = ""
+
+  private fun badModels(): Set<String> =
+    HashSet(prefs.getStringSet("bad_models", emptySet()) ?: emptySet())
+
+  private fun markModelBad(model: String) {
+    if (model.isBlank()) return
+    val set = HashSet(badModels())
+    set.add(model)
+    prefs.edit().putStringSet("bad_models", set).apply()
+  }
+
   private fun openSocket(apiKey: String, model: String) {
+    currentModel = model
     val voice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede"
     val userName = prefs.getString("user_name", "Sir") ?: "Sir"
     val personality = prefs.getString("personality_mode", "gf") ?: "gf"
@@ -164,6 +181,8 @@ class GeminiLiveClient(
       override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
         Log.d(TAG, "WebSocket closing: $code / $reason")
         if (code != 1000) onError?.invoke("Server closed: $code $reason")
+        // Model support nahi karta (1007/1008)? Usse yaad rakho, agli baar dusra model chuno
+        if (code == 1007 || code == 1008) markModelBad(currentModel)
         isConnected = false
         isSetupComplete = false
       }
