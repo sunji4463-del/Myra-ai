@@ -113,12 +113,12 @@ class GeminiLiveClient(
         }
       }
       Log.d(TAG, "Live models: $live")
+      // Sabse tez model pehle: half-cascade "live" model, phir native-audio
       when {
         live.isEmpty() -> fallback
-        saved != null && live.contains(saved) -> saved
-        else -> live.firstOrNull { it.contains("native-audio") && !it.contains("preview-09") }
+        else -> live.firstOrNull { it.contains("live") && !it.contains("native-audio") && !it.contains("preview-09") }
+          ?: live.firstOrNull { it.contains("native-audio") && !it.contains("preview-09") }
           ?: live.firstOrNull { it.contains("native-audio") }
-          ?: live.firstOrNull { it.contains("live") }
           ?: live.first()
       }
     } catch (e: Exception) {
@@ -208,7 +208,7 @@ class GeminiLiveClient(
               })
             })
           })
-          put("temperature", 0.9)
+          put("temperature", 0.7)
         })
         put("output_audio_transcription", JSONObject())
         put("input_audio_transcription", JSONObject())
@@ -220,7 +220,7 @@ class GeminiLiveClient(
             put("start_of_speech_sensitivity", "START_SENSITIVITY_HIGH")
             put("end_of_speech_sensitivity", "END_SENSITIVITY_HIGH")
             put("prefix_padding_ms", 20)
-            put("silence_duration_ms", 350)
+            put("silence_duration_ms", 250)
           })
         })
       })
